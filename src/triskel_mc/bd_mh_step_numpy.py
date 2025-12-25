@@ -1,4 +1,4 @@
-# src/ptdamh/BD_MH_step_numpy.py
+# src/triskel_mc/bd_mh_step_numpy.py
 from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Tuple, Literal, List
