@@ -188,6 +188,13 @@ def _log_symmetrization(k: np.ndarray) -> np.ndarray:
     return -gammaln(k + 1.0)
 
 
+def _resolve_slot_indices(D: int, slot_sel) -> np.ndarray:
+    """Return resolved slot indices as a 1D ndarray."""
+    if isinstance(slot_sel, slice):
+        return np.arange(D)[slot_sel]
+    return np.where(np.asarray(slot_sel, bool))[0]
+
+
 
 # =============================================================================
 #                         NumPy proposals (CPU-friendly)
@@ -261,11 +268,7 @@ def propose_stretch_redblue_slot_np(
       X_prop (C,W,D), logJ (C,W), moved_mask (C,W)
     """
     C, W, D = X.shape
-    # resolve slot indices and its dimensionality
-    if isinstance(slot_sel, slice):
-        idx = np.arange(D)[slot_sel]
-    else:
-        idx = np.where(np.asarray(slot_sel, bool))[0]
+    idx = _resolve_slot_indices(D, slot_sel)
     d_slot = idx.size
     if d_slot == 0:
         return X.copy(), np.zeros((C, W), dtype=X.dtype), np.zeros((C, W), dtype=bool)
@@ -319,11 +322,7 @@ def propose_rw_fullcov_slot_np(
 ) -> np.ndarray:
     C, W, D = X.shape
     out = X.copy()
-    # resolve slot indices and dimension
-    if isinstance(slot_sel, slice):
-        idx = np.arange(D)[slot_sel]
-    else:
-        idx = np.where(np.asarray(slot_sel, bool))[0]
+    idx = _resolve_slot_indices(D, slot_sel)
     d_slot = idx.size
     if d_slot == 0:
         return out
@@ -356,13 +355,10 @@ def propose_rw_eigenline_slot_np(
     S: np.ndarray,            # (C,D)   eigenvalues
     slot_sel,
 ) -> np.ndarray:
-    
+
     C, W, D = X.shape
     out = X.copy()
-    if isinstance(slot_sel, slice):
-        idx = np.arange(D)[slot_sel]
-    else:
-        idx = np.where(np.asarray(slot_sel, bool))[0]
+    idx = _resolve_slot_indices(D, slot_sel)
     d_slot = idx.size
     if d_slot == 0:
         return out
@@ -408,10 +404,7 @@ def propose_rw_student_t_slot_np(
 ) -> np.ndarray:
     C, W, D = X.shape
     out = X.copy()
-    if isinstance(slot_sel, slice):
-        idx = np.arange(D)[slot_sel]
-    else:
-        idx = np.where(np.asarray(slot_sel, bool))[0]
+    idx = _resolve_slot_indices(D, slot_sel)
     d_slot = idx.size
     if d_slot == 0:
         return out
@@ -441,11 +434,7 @@ def propose_de_two_point_slot_np(
     C, W, D = X.shape
     out = X.copy()
 
-    # resolve slot indices
-    if isinstance(slot_sel, slice):
-        idx = np.arange(D)[slot_sel]
-    else:
-        idx = np.where(np.asarray(slot_sel, bool))[0]
+    idx = _resolve_slot_indices(D, slot_sel)
     d_slot = idx.size
     if d_slot == 0:
         return out, np.zeros((C, W), dtype=bool)
