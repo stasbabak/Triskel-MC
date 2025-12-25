@@ -3,3 +3,11 @@
 <img src="assets/TRISKEL-MC.gif" width="450" alt="TRISKEL-MC">
 
 Time continuous Markov Chain Monte Carlo with product space
+
+## Installation
+
+Install the package in editable mode to use the provided NumPy/JAX utilities:
+
+```bash
+pip install -e .
+```

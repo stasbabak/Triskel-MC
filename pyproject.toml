@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triskel-mc"
+version = "0.1.0"
+description = "Time-continuous Markov Chain Monte Carlo with product space"
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "Triskel-MC Contributors" }]
+license = { text = "Proprietary" }
+dependencies = [
+  "numpy",
+  "jax",
+  "jaxlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"triskel_mc" = ["*.py"]
