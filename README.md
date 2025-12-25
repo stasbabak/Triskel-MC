@@ -1,5 +1,5 @@
 # Triskel-MC
 
-![TRISKEL-MC](assets/TRISKEL-MC.gif)
+<img src="assets/TRISKEL-MC.gif" width="450" alt="TRISKEL-MC">
 
 Time continuous Markov Chain Monte Carlo with product space
