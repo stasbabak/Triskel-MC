@@ -6,7 +6,8 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-from .states import MHEvent, PTState
+from .states import MHEvent, PTState, PSState
+from .birth_death import compute_bd_hazards_all
 
 
 def _resolve_slot_indices(D: int, slot_sel) -> np.ndarray:
@@ -286,39 +287,65 @@ def _scatter_into(base: np.ndarray, data: np.ndarray, idx: tuple[np.ndarray, np.
 
 
 def gibbs_mh_sweep_active_np(
+    # rng: np.random.Generator,
+    # event_log,
+    # run_trace,
+    # t_abs,
+    # dt,
+    # # thetas,
+    # # lps,
+    # pt_state,
+    # ps_state,
+    # betas,
+    # # Kmax,
+    # slot_slices,
+    # Ls = None,
+    # U = None,
+    # S = None,
+    # do_stretch=True,
+    # do_rw_fullcov=True,
+    # do_rw_eigenline=True,
+    # do_rw_student_t=True,
+    # do_de=True,
+    # do_PTswap=True,
+    # qb_density_np=None,
+    # qb_eval_variant="child",
+    # log_prior_phi_np=None,
+    # # log_pseudo_phi_np=None,
+    # # log_p_k_np=None,
+    # batched_loglik_masked=None,
+    # bd_rate_scale=1.0,
+    # cross_rate=0.8,
+    # gamma_de=2.38,
+    # stretch_a=2.0,
     rng: np.random.Generator,
-    event_log,
-    run_trace,
+    *,
     t_abs,
     dt,
-    thetas,
-    lps,
+    pt_state: PTState,
     ps_state,
-    betas,
-    Kmax,
     slot_slices,
-    Ls,
-    U,
-    S,
+    betas,
+    batched_loglik_masked=None,
+    log_prior_phi_np=None,
+    Ls=None,
+    U=None,
+    S=None,
     do_stretch=True,
     do_rw_fullcov=True,
     do_rw_eigenline=True,
     do_rw_student_t=True,
     do_de=True,
     do_PTswap=True,
-    qb_density_np=None,
-    qb_eval_variant="child",
-    log_prior_phi_np=None,
-    log_pseudo_phi_np=None,
-    log_p_k_np=None,
-    batched_loglik_masked=None,
-    bd_rate_scale=1.0,
+    stretch_a=2.0,
     cross_rate=0.8,
     gamma_de=2.38,
-    stretch_a=2.0,
+    event_log=None,
+    run_trace=None,
 ):
-    from .birth_death import compute_bd_hazards_all
-    from .states import PTState
+
+    thetas, lps = pt_state.thetas, pt_state.log_probs
+    Kmax = ps_state.m.shape[-1]
 
     def _slot_prior_np(phi_cwd: np.ndarray) -> np.ndarray:
         return np.vectorize(log_prior_phi_np, signature="(d)->()")(phi_cwd)
@@ -359,7 +386,7 @@ def gibbs_mh_sweep_active_np(
         return prior_full
 
     C, W, D = thetas.shape
-    run_trace.begin_mh_tick(t_abs, dt)
+    # run_trace.begin_mh_tick(t_abs, dt)
     lps = np.asarray(lps, dtype=np.float64)
     ps_state.logpi = np.asarray(ps_state.logpi, dtype=np.float64)
 
@@ -718,17 +745,26 @@ def gibbs_mh_sweep_active_np(
                     pt=pt_state,
                     ps=ps_state,
                 )
-            maxdiff, diffs = validate_ll_snapshot(
-                batched_loglik_masked,
-                run_trace.mh_ticks[-1].submoves[-1].phi_sel,
-                run_trace.mh_ticks[-1].submoves[-1].m_sel,
-                None,
-                run_trace.mh_ticks[-1].submoves[-1].ll_sel,
-            )
-            if maxdiff > 1e-6:
-                print(f"[warn] LL mismatch after DE slot {j}: max |Δ|={maxdiff:.3e}")
+            # maxdiff, diffs = validate_ll_snapshot(
+            #     batched_loglik_masked,
+            #     run_trace.mh_ticks[-1].submoves[-1].phi_sel,
+            #     run_trace.mh_ticks[-1].submoves[-1].m_sel,
+            #     None,
+            #     run_trace.mh_ticks[-1].submoves[-1].ll_sel,
+            # )
+            # if maxdiff > 1e-6:
+            #     print(f"[warn] LL mismatch after DE slot {j}: max |Δ|={maxdiff:.3e}")
 
-    return thetas, lps, ps_state
+    if do_PTswap:
+        # even pass
+        pt_state, acc, att = pt_swap_pass_numpy(rng, pt_state, betas, even_pass=True)
+        ps_swap_pass_inplace(ps_state, acc, even_pass=True)
+
+        # odd pass
+        pt_state, acc, att = pt_swap_pass_numpy(rng, pt_state, betas, even_pass=False)
+        ps_swap_pass_inplace(ps_state, acc, even_pass=False)
+
+    return pt_state, ps_state
 
 
 def pt_swap_pass_numpy(

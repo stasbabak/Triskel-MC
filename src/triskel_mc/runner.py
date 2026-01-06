@@ -12,7 +12,7 @@ from .birth_death import (
     make_batched_loglik_masked,
 )
 from .mh_moves import gibbs_mh_sweep_active_np
-from .states import EventLog, PTState, PSState, RunTrace, TraceConfig
+from .states import EventLog, PTState, PSState, RunTrace, TraceConfig, BDEvent, MHEvent
 
 
 class _NullTqdm:
@@ -517,7 +517,7 @@ def run_ct_mcmc(
                 tr.begin_mh_tick(t_abs=t_next, dt=(t_next - t))
 
             # Perform MH sweep at t_next
-            pt = gibbs_mh_sweep_active_np(
+            pt, ps = gibbs_mh_sweep_active_np(
                 rng,
                 t_abs=t_next,
                 dt=(t_next - t),
@@ -542,6 +542,8 @@ def run_ct_mcmc(
                 event_log=events,
                 run_trace=tr,
             )
+            # keep cached logpi consistent for traces / swaps
+            ps.logpi[...] = pt.log_probs
 
             # reset all BD clocks after MH (memoryless, and hazards may change via θ)
             # lam_on, lam_off, lam_total = compute_bd_hazards_all(
@@ -551,6 +553,7 @@ def run_ct_mcmc(
             #     log_p_k_np=log_p_k_np,
             #     batched_loglik_masked=batched_ll_masked
             # )
+
             if DO_BD:
                 if DO_PSEUDO_REFRESH:
                     idxs = np.argwhere(~ps.m)  # (n_inactive, 3) over (c,w,slot)
