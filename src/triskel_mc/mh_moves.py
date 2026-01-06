@@ -253,7 +253,7 @@ def apply_mh_and_record_np(
         move_mask,
     )
     thetas_new = np.where(accept[:, :, None], thetas_prop, pt.thetas)
-    ll_new = np.where(accept, ll_prop, pt.log_probs)
+    ll_new = np.where(accept, ll_prop, ll_cur)
     pt_new = PTState(thetas=thetas_new, log_probs=ll_new)
 
     C, W = pt.thetas.shape[:2]
@@ -446,7 +446,7 @@ def gibbs_mh_sweep_active_np(
                 dt,
                 j,
                 "stretch",
-                PTState(thetas, lps),
+                pt_state,
                 thetas_prop=prop1,
                 ll_cur=ll_cur,
                 ll_prop=ll_prop,
@@ -503,7 +503,7 @@ def gibbs_mh_sweep_active_np(
                 dt,
                 j,
                 "stretch",
-                PTState(thetas, lps),
+                pt_state,
                 thetas_prop=prop2,
                 ll_cur=ll_cur,
                 ll_prop=ll_prop,
@@ -555,7 +555,7 @@ def gibbs_mh_sweep_active_np(
                 dt,
                 j,
                 "rw_fullcov",
-                PTState(thetas, lps),
+                pt_state,
                 thetas_prop=prop,
                 ll_cur=ll_cur,
                 ll_prop=ll_prop,
@@ -607,7 +607,7 @@ def gibbs_mh_sweep_active_np(
                 dt,
                 j,
                 "rw_eigenline",
-                PTState(thetas, lps),
+                pt_state,
                 thetas_prop=prop,
                 ll_cur=ll_cur,
                 ll_prop=ll_prop,
@@ -659,7 +659,7 @@ def gibbs_mh_sweep_active_np(
                 dt,
                 j,
                 "rw_student_t",
-                PTState(thetas, lps),
+                pt_state,
                 thetas_prop=prop,
                 ll_cur=ll_cur,
                 ll_prop=ll_prop,
@@ -720,7 +720,7 @@ def gibbs_mh_sweep_active_np(
                 dt,
                 j,
                 "de",
-                PTState(thetas, lps),
+                pt_state,
                 thetas_prop=prop,
                 ll_cur=ll_cur,
                 ll_prop=ll_prop,
