@@ -4,6 +4,8 @@ from typing import Callable, Optional, Tuple, Literal
 
 import numpy as np
 import jax.numpy as jnp
+from tqdm.auto import tqdm
+
 
 from .birth_death import (
     _log_symmetrization,
@@ -13,6 +15,7 @@ from .birth_death import (
 )
 from .mh_moves import gibbs_mh_sweep_active_np
 from .states import EventLog, PTState, PSState, RunTrace, TraceConfig, BDEvent, MHEvent
+
 
 
 class _NullTqdm:
@@ -31,8 +34,8 @@ class _NullTqdm:
         pass
 
 
-def tqdm(total, desc="", unit=""):
-    return _NullTqdm(total, desc, unit)
+# def tqdm(total, desc="", unit=""):
+#     return _NullTqdm(total, desc, unit)
 
 # --- DEBUG knobs ---------------------------------------------------------  # ### ADDED
 _DO_BD_DB_CHECK = True  # ### ADDED
@@ -42,6 +45,27 @@ _LL_HARD_MIN = -1e12  # flag very bad LL                               # ### ADD
 
 DO_PSEUDO_REFRESH = True  # set True to enable
 
+
+def recompute_logpi(ps, pt_ll, betas, log_prior_phi_np, log_pseudo_phi_np, log_p_k_np):
+    phi, m = ps.phi, ps.m
+    C, W, Kmax, d = phi.shape
+
+    comp = np.zeros((C, W), dtype=np.float64)
+    for j in range(Kmax):
+        comp += np.where(
+            m[:, :, j],
+            np.vectorize(log_prior_phi_np,  signature="(d)->()")(phi[:, :, j, :]),
+            np.vectorize(log_pseudo_phi_np, signature="(d)->()")(phi[:, :, j, :]),
+        )
+
+    k = m.astype(np.int32).sum(axis=-1)  # (C,W)
+    comb = (
+        log_p_k_np(k)
+        + _log_uniform_masks_given_k(Kmax, k)
+        + _log_symmetrization(k)
+    )
+
+    return comp + comb + betas[:, None] * pt_ll
 
 def run_ct_mcmc(
     *,
@@ -167,7 +191,7 @@ def run_ct_mcmc(
     # with tqdm(total=N_ticks_est, desc="MH ticks") as pbar:
 
     # main loop
-    with tqdm(total=T_end, desc="CT-MCMC run", unit="time") as pbar:
+    with tqdm(total=float(T_end), desc="CT-MCMC run", unit="time", disable=False) as pbar:
         while t < T_end:
             t_in = t
             # next MH tick
@@ -481,6 +505,8 @@ def run_ct_mcmc(
                         old_phi = ps.phi[c_min, w_min, slot, :].copy()
                         new_phi = sample_pseudo_phi()
                         ps.phi[c_min, w_min, slot, :] = new_phi
+                        sl = slot_slices[slot]
+                        pt.thetas[c_min, w_min, sl] = new_phi  ### TODO: Do I need this?
                         # keep cached tempered logπ consistent (optional)
                         ps.logpi[c_min, w_min] += log_pseudo_phi_np(
                             new_phi
@@ -543,7 +569,8 @@ def run_ct_mcmc(
                 run_trace=tr,
             )
             # keep cached logpi consistent for traces / swaps
-            ps.logpi[...] = pt.log_probs
+            # ps.logpi[...] = pt.log_probs
+            ps.logpi[...] = recompute_logpi(ps, pt.log_probs, betas, log_prior_phi_np, log_pseudo_phi_np, log_p_k_np)
 
             # reset all BD clocks after MH (memoryless, and hazards may change via θ)
             # lam_on, lam_off, lam_total = compute_bd_hazards_all(

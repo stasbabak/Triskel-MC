@@ -28,7 +28,10 @@ def make_batched_loglik_masked(
         [jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray
     ],
 ):
-    """Return two JAX-compiled batched evaluators."""
+    """Return two JAX-compiled batched evaluators.
+        1) batched_cur(phi: (B,Kmax,d), m: (B,Kmax), rest: (B,Drest or 0)) -> (B,)
+        2) batched_off(phi: (B*Kmax,Kmax,d), m: (B*Kmax,Kmax), rest: (B*Kmax,Drest or 0)) -> (B*Kmax,)
+    """
 
     f = jax.jit(
         jax.vmap(log_lik_masked_jax, in_axes=(0, 0, 0))
@@ -46,6 +49,31 @@ def make_batched_loglik_masked(
         )
 
     return batched
+
+
+
+# def make_batched_loglik_masked(log_lik_masked_jax):
+#     """Return a batched evaluator that supports rest_b being None."""
+#
+#     # case A: rest provided (batched)
+#     f_with_rest = jax.jit(jax.vmap(log_lik_masked_jax, in_axes=(0, 0, 0)))
+#
+#     # case B: rest is None (do NOT vmap over None)
+#     def _ll_no_rest(phi, m):
+#         return log_lik_masked_jax(phi, m, None)
+#     f_no_rest = jax.jit(jax.vmap(_ll_no_rest, in_axes=(0, 0)))
+#
+#     def batched(phi_b, m_b, rest_b):
+#         phi_b = jnp.asarray(phi_b)
+#         m_b = jnp.asarray(m_b)
+#         if rest_b is None:
+#             out = f_no_rest(phi_b, m_b)
+#         else:
+#             out = f_with_rest(phi_b, m_b, jnp.asarray(rest_b))
+#         return np.asarray(out)
+#
+#     return batched
+
 
 
 def masked_ll_for_phi_batch(

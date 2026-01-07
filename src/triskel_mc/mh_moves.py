@@ -373,17 +373,23 @@ def gibbs_mh_sweep_active_np(
         return ll_subset, ll_full
 
     def _slot_prior_subset(phi_j_full, idx_subset):
+        # c_idx, w_idx = idx_subset
+        # phi_subset = phi_j_full[c_idx, w_idx]
+        # prior_subset = np.vectorize(log_prior_phi_np, signature="(d)->()")(
+        #     phi_subset
+        # )
+        # prior_full = _scatter_into(
+        #     np.zeros((phi_j_full.shape[0], phi_j_full.shape[1])),
+        #     prior_subset,
+        #     idx_subset,
+        # )
+        # return prior_full
         c_idx, w_idx = idx_subset
-        phi_subset = phi_j_full[c_idx, w_idx]
-        prior_subset = np.vectorize(log_prior_phi_np, signature="(d)->()")(
-            phi_subset
-        )
-        prior_full = _scatter_into(
-            np.zeros((phi_j_full.shape[0], phi_j_full.shape[1])),
-            prior_subset,
-            idx_subset,
-        )
-        return prior_full
+        if c_idx.size == 0:
+            return np.empty((0,), dtype=np.float64)
+        phi_subset = phi_j_full[c_idx, w_idx]  # (Nsel, d)
+        return np.vectorize(log_prior_phi_np, signature="(d)->()")(phi_subset).astype(np.float64)
+
 
     C, W, D = thetas.shape
     # run_trace.begin_mh_tick(t_abs, dt)
@@ -408,6 +414,7 @@ def gibbs_mh_sweep_active_np(
 
         ll_cur = _masked_ll(ps_state.phi)  # (C,W)
         lprior_cur_j = _slot_prior_np(ps_state.phi[:, :, j, :])  # (C,W)
+        # print (f'debug: phi shape {ps_state.phi[:, :, j, :].shape}, lprior: {lprior_cur_j.shape}')
 
         if do_stretch:
             red, blue = redblue_mask_np(rng, C, W)
@@ -420,7 +427,7 @@ def gibbs_mh_sweep_active_np(
                 subset_mask=red,
                 slot_sel=slot_sel,
                 a=stretch_a,
-                partner_pool_mask=~red,
+                partner_pool_mask=(~red) & move_mask,
             )
             attempt_mask = red & moved1
             c_idx, w_idx = _indices(attempt_mask)
@@ -437,6 +444,7 @@ def gibbs_mh_sweep_active_np(
             lprior_prop_j_full = lprior_cur_j.copy()
             if c_idx.size:
                 pj_sub = _slot_prior_subset(phi_prop[:, :, j, :], (c_idx, w_idx))
+                # print (f'debug , pj_sub shape = {pj_sub.shape}, lprior: {lprior_prop_j_full[c_idx, w_idx].shape}, l_prior_cur_j: {lprior_cur_j.shape}')
                 lprior_prop_j_full[c_idx, w_idx] = pj_sub
 
             pt_state, accept = apply_mh_and_record_np(
@@ -477,7 +485,7 @@ def gibbs_mh_sweep_active_np(
                 subset_mask=blue,
                 slot_sel=slot_sel,
                 a=stretch_a,
-                partner_pool_mask=~blue,
+                partner_pool_mask=(~blue) & move_mask,
             )
             attempt_mask = blue & moved2
             c_idx, w_idx = _indices(attempt_mask)
@@ -773,33 +781,47 @@ def pt_swap_pass_numpy(
     betas: np.ndarray,
     even_pass: bool,
 ) -> Tuple[PTState, np.ndarray, np.ndarray]:
-    thetas, log_probs = state.thetas, state.log_probs
-    C, W, D = thetas.shape
 
-    acc = np.zeros((C, W), dtype=bool)
-    att = np.zeros((C, W), dtype=bool)
+        thetas, lps = state.thetas, state.log_probs
+        C, W, D = thetas.shape
+        start = 0 if even_pass else 1
+        idx_low  = np.arange(start, C-1, 2, dtype=np.int32)
+        idx_high = idx_low + 1
 
-    pair_indices = list(range(0 if even_pass else 1, C - 1, 2))
+        bi, bj = betas[idx_low], betas[idx_high]
+        li = lps[idx_low, :]
+        lj = lps[idx_high, :]
+        delta = (bi - bj)[:, None] * (lj - li)     # (P,W)
+        log_u = np.log(rng.random(delta.shape))
+        accept_pairs = log_u < np.minimum(0.0, delta)
 
-    for c in pair_indices:
-        c_next = c + 1
-        delta = (betas[c_next] - betas[c]) * (log_probs[c_next] - log_probs[c])
-        log_u = np.log(rng.random(W))
-        accept = log_u < delta
-        acc[c, :] = accept
-        acc[c_next, :] = accept
-        att[c, :] = True
-        att[c_next, :] = True
+        th = thetas.copy()
+        lp = lps.copy()
+        for p in range(idx_low.shape[0]):
+            i = idx_low[p]; j = idx_high[p]
+            mask = accept_pairs[p]                  # (W,)
+            mask_wd = mask[:, None]
+            thi, thj = th[i].copy(), th[j].copy()
+            lpi, lpj = lp[i].copy(), lp[j].copy()
+            th[i] = np.where(mask_wd, thj, thi)
+            th[j] = np.where(mask_wd, thi, thj)
+            lp[i] = np.where(mask, lpj, lpi)
+            lp[j] = np.where(mask, lpi, lpj)
 
-        thetas_c = thetas[c].copy()
-        thetas[c][accept] = thetas[c_next][accept]
-        thetas[c_next][accept] = thetas_c[accept]
+        att_mask = np.zeros((C, W), dtype=bool)
+        for p in range(idx_low.shape[0]):
+            i = idx_low[p]; j = idx_high[p]
+            att_mask[i, :] = True
+            att_mask[j, :] = True
 
-        lp_c = log_probs[c].copy()
-        log_probs[c][accept] = log_probs[c_next][accept]
-        log_probs[c_next][accept] = lp_c[accept]
+        acc_mask = np.zeros((C, W), dtype=bool)
+        for p in range(idx_low.shape[0]):
+            i = idx_low[p]; j = idx_high[p]
+            acc_mask[i] |= accept_pairs[p]
+            acc_mask[j] |= accept_pairs[p]
 
-    return PTState(thetas, log_probs), acc, att
+        return PTState(thetas=th, log_probs=lp), acc_mask, att_mask
+
 
 
 def ps_swap_pass_inplace(ps: "PSState", acc: np.ndarray, even_pass: bool):

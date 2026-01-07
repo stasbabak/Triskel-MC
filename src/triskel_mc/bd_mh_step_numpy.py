@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from .birth_death import *
 from .mh_moves import *
-from .runner import run_ct_mcmc, run_epoch_ct_numpy
+from .runner import run_ct_mcmc
 from .states import *
 
 __all__ = [name for name in globals() if not name.startswith("_")]
