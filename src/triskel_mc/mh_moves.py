@@ -772,6 +772,37 @@ def gibbs_mh_sweep_active_np(
         pt_state, acc, att = pt_swap_pass_numpy(rng, pt_state, betas, even_pass=False)
         ps_swap_pass_inplace(ps_state, acc, even_pass=False)
 
+        acc_pt = acc_e | acc_o
+        att_pt = att_e | att_o
+
+        # RECORD pt swaps into EventLog (missing in split)
+        if event_log is not None:
+            C, W = acc_pt.shape
+            for c in range(C):
+                for w in range(W):
+                    if att_pt[c, w]:
+                        event_log.mh_events.append(
+                            MHEvent(
+                                t_abs=t_abs,
+                                dt=dt,
+                                c=c,
+                                w=w,
+                                slot=-1,
+                                move_type="ptswap",
+                                accepted=bool(acc_pt[c, w]),
+                            )
+                        )
+
+        # OPTIONAL: also snapshot in RunTrace like original
+        if run_trace is not None:
+            run_trace.add_submove_snapshot(
+                move_type="ptswap",
+                slot_j=-1,
+                accepted_mask=acc_pt,
+                pt=pt_state,
+                ps=ps_state,
+            )
+
     return pt_state, ps_state
 
 
