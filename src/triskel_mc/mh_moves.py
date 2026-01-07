@@ -765,12 +765,12 @@ def gibbs_mh_sweep_active_np(
 
     if do_PTswap:
         # even pass
-        pt_state, acc, att = pt_swap_pass_numpy(rng, pt_state, betas, even_pass=True)
-        ps_swap_pass_inplace(ps_state, acc, even_pass=True)
+        pt_state, acc_e, att_e = pt_swap_pass_numpy(rng, pt_state, betas, even_pass=True)
+        ps_swap_pass_inplace(ps_state, acc_e, even_pass=True)
 
         # odd pass
-        pt_state, acc, att = pt_swap_pass_numpy(rng, pt_state, betas, even_pass=False)
-        ps_swap_pass_inplace(ps_state, acc, even_pass=False)
+        pt_state, acc_o, att_o = pt_swap_pass_numpy(rng, pt_state, betas, even_pass=False)
+        ps_swap_pass_inplace(ps_state, acc_o, even_pass=False)
 
         acc_pt = acc_e | acc_o
         att_pt = att_e | att_o
