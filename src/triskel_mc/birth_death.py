@@ -97,25 +97,47 @@ def _logsigmoid(x):
     return -np.log1p(np.exp(-np.clip(x, -700, 700)))
 
 
+# def compute_bd_hazards_all(
+#     ps: PSState,
+#     betas: np.ndarray,  # (C,) 1/temps
+#     *,
+#     qb_density_np: Callable[
+#         [np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray
+#     ],
+#     qb_eval_variant: Literal["child", "parent"],
+#     log_prior_phi_np: Callable[[np.ndarray], float],
+#     log_pseudo_phi_np: Callable[[np.ndarray], float],
+#     log_p_k_np: Callable[[np.ndarray], np.ndarray],  # vectorized over k (B,)
+#     batched_loglik_masked: Callable[
+#         [np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray
+#     ],
+#     bd_rate_scale=1.0,
+# ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
+# log_p_mask_np(m, slot_type, must_be_on, can_toggle) -> (C,W)
+# lot_type can be int/str codes; we'll keep it as np.ndarray
+
 def compute_bd_hazards_all(
     ps: PSState,
-    betas: np.ndarray,  # (C,) 1/temps
+    betas: np.ndarray,
     *,
-    qb_density_np: Callable[
-        [np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray
-    ],
+    qb_density_np: Callable[..., np.ndarray],
     qb_eval_variant: Literal["child", "parent"],
-    log_prior_phi_np: Callable[[np.ndarray], float],
-    log_pseudo_phi_np: Callable[[np.ndarray], float],
-    log_p_k_np: Callable[[np.ndarray], np.ndarray],  # vectorized over k (B,)
-    batched_loglik_masked: Callable[
-        [np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray
-    ],
+    log_prior_phi_np: Callable[[np.ndarray, int], float],
+    log_pseudo_phi_np: Callable[[np.ndarray, int], float],
+    log_p_mask_np: Callable[[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]], np.ndarray], ##(C, W)
+    batched_loglik_masked: Callable[[np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray],
     bd_rate_scale=1.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
     """Compute hazards (lam_on, lam_off, lam_total) for ALL (c,w) in one shot."""
 
     phi, m, rest, logpi_cur = ps.phi, ps.m, ps.rest, ps.logpi
+    slot_dim  = ps.slot_dim
+    slot_type = ps.slot_type
+    must_be_on = ps.must_be_on
+    can_toggle = ps.can_toggle
+
     C, W, Kmax, d = phi.shape
     B = C * W
     beta_cw = betas[:, None]  # (C,1)
@@ -125,6 +147,17 @@ def compute_bd_hazards_all(
         return np.where(x > 0.0, np.log(x), -np.inf)
 
     log_bd_scale = np.log(max(bd_rate_scale, 1e-300))
+
+    ### I want some model to be always on (like noise model) and others can toggle (like signal)
+    # [CHANGED] defaults for constraints if None
+    if must_be_on is None:
+        must_be_on = np.zeros((Kmax,), dtype=bool)
+    if can_toggle is None:
+        can_toggle = np.ones((Kmax,), dtype=bool)
+
+    # [ADDED] eligibility masks (C,W,Kmax) enforcing constraints
+    eligible_on = (~m) & can_toggle[None, None, :] & (~must_be_on[None, None, :])
+    eligible_off = (m) & can_toggle[None, None, :] & (~must_be_on[None, None, :])
 
     # ----- Build current-mask batch to compute current LL -----
     phi_cur = phi.reshape(B, Kmax, d)  # (B,Kmax,d)
@@ -169,64 +202,39 @@ def compute_bd_hazards_all(
     )  # (B*Kmax,)
     ll_on = ll_on_flat.reshape(C, W, Kmax)  # (C,W,Kmax)
 
-    # ----- Static prior/pseudoprior + k-terms for current and off -----
+    # ----- per-slot prior/pseudo with true slot dimension and slot type
     comp_cur = np.zeros((C, W), dtype=np.float64)
-    for i in range(Kmax):
-        act = m[:, :, i]
-        comp_cur += np.where(
-            act,
-            np.vectorize(log_prior_phi_np, signature="(d)->()")(
-                phi[:, :, i, :]
-            ),
-            np.vectorize(log_pseudo_phi_np, signature="(d)->()")(
-                phi[:, :, i, :]
-            ),
-        )
-
-    k_cur = m.astype(np.int32).sum(axis=-1)  # (C,W)
-    comb_cur = (
-        log_p_k_np(k_cur)
-        + _log_uniform_masks_given_k(Kmax, k_cur)
-        + _log_symmetrization(k_cur)
-    )  # (C,W)
-
-    logpi_unscaled_cur = comb_cur + comp_cur  # (C,W)
-
+    logp   = np.zeros((C, W, Kmax), dtype=np.float64)
     logpsi = np.zeros((C, W, Kmax), dtype=np.float64)
-    logp = np.zeros((C, W, Kmax), dtype=np.float64)
-    for i in range(Kmax):
-        logpsi[:, :, i] = np.vectorize(log_pseudo_phi_np, signature="(d)->()")(
-            phi[:, :, i, :]
-        )
-        logp[:, :, i] = np.vectorize(log_prior_phi_np, signature="(d)->()")(
-            phi[:, :, i, :]
-        )
-    act = m  # (C,W,Kmax) bool
 
-    delta_comp_off = (logpsi - logp) * act  # (C,W,Kmax)
-    k_off = np.clip(k_cur - 1, 0, Kmax)  # (C,W)
-    comb_off = (
-        log_p_k_np(k_off)
-        + _log_uniform_masks_given_k(Kmax, k_off)
-        + _log_symmetrization(k_off)
-    )
-    comb_off_b = np.repeat(comb_off[:, :, None], Kmax, axis=2)
-    comb_cur_b = np.repeat(comb_cur[:, :, None], Kmax, axis=2)
-    delta_comb_off = (comb_off_b - comb_cur_b) * act  # (C,W,Kmax)
+    for j in range(Kmax):
+        dj = int(slot_dim[j])
+        tj = int(slot_type[j])
+        phi_j = phi[:, :, j, :dj]  # <-- [CHANGED] use slot_dim
 
-    delta_unscaled_off = delta_comp_off + delta_comb_off
-    delta_comp_on = (logp - logpsi) * (~m)  # sign flip vs OFF
-    k_on = np.clip(k_cur + 1, 0, Kmax)
-    comb_on = (
-        log_p_k_np(k_on)
-        + _log_uniform_masks_given_k(Kmax, k_on)
-        + _log_symmetrization(k_on)
-    )
-    delta_comb_on = (
-        np.repeat(comb_on[:, :, None], Kmax, axis=2)
-        - np.repeat(comb_cur[:, :, None], Kmax, axis=2)
-    ) * (~m)
-    delta_unscaled_on = delta_comp_on + delta_comb_on
+        logp[:, :, j] = np.vectorize(lambda v: log_prior_phi_np(v, tj), signature="(d)->()")(phi_j)
+        logpsi[:, :, j] = np.vectorize(lambda v: log_pseudo_phi_np(v, tj), signature="(d)->()")(phi_j)
+        comp_cur += np.where(m[:, :, j], logp[:, :, j], logpsi[:, :, j])
+
+    # [ADDED] generic mask prior p(m) (replaces p(k)*binom*1/k!)
+    logpm_cur = log_p_mask_np(m, slot_type, must_be_on, can_toggle)  # (C,W)
+    logpi_unscaled_cur = logpm_cur + comp_cur  # (C,W)
+
+    logpm_off = np.full((C, W, Kmax), -np.inf, dtype=np.float64)
+    logpm_on = np.full((C, W, Kmax), -np.inf, dtype=np.float64)
+    for j in range(Kmax):
+        m_off_j = m.copy()
+        m_off_j[:, :, j] = False
+        logpm_off[:, :, j] = log_p_mask_np(m_off_j, slot_type, must_be_on, can_toggle)
+
+        m_on_j = m.copy()
+        m_on_j[:, :, j] = True
+        logpm_on[:, :, j] = log_p_mask_np(m_on_j, slot_type, must_be_on, can_toggle)
+
+    # [CHANGED] unscaled deltas now use log_p_mask differences (no k_cur/k_on/k_off etc.)
+    delta_unscaled_off = (logpm_off - logpm_cur[:, :, None]) + (logpsi - logp) * m
+    delta_unscaled_on = (logpm_on - logpm_cur[:, :, None]) + (logp - logpsi) * (~m)
+
 
     beta_cw = betas[:, None]  # (C,1)
 
@@ -236,52 +244,79 @@ def compute_bd_hazards_all(
     log_lam_on = np.full((C, W, Kmax), -np.inf, dtype=np.float64)
     log_lam_off = np.full((C, W, Kmax), -np.inf, dtype=np.float64)
 
+
     for j in range(Kmax):
+        dj = int(slot_dim[j])
+        tj = int(slot_type[j])
+        phi_j = phi[:, :, j, :dj]  # <-- [CHANGED] use slot_dim
+
+        # q_fwd for ON (inactive -> active)
         if qb_eval_variant == "child":
             ctx_fwd = m.copy()
             ctx_fwd[:, :, j] = True
         else:
             ctx_fwd = m
-        q_fwd = qb_density_np(phi[:, :, j, :], ctx_fwd, phi, ps.rest)
+
+        #  pass slot metadata; and pass phi_j not padded
+        q_fwd = qb_density_np(phi_j, ctx_fwd, phi, ps.rest, slot=j, slot_type=tj)
         log_q_fwd = _log_pos(q_fwd) + log_bd_scale
 
+        # q_rev for reverse OFF at destination
         if qb_eval_variant == "child":
             ctx_rev = m.copy()
             ctx_rev[:, :, j] = False
         else:
             ctx_rev = m.copy()
             ctx_rev[:, :, j] = True
-        q_rev = qb_density_np(phi[:, :, j, :], ctx_rev, phi, ps.rest)
+
+        # [CHANGED] pass slot metadata
+        q_rev = qb_density_np(phi_j, ctx_rev, phi, ps.rest, slot=j, slot_type=tj)
         log_q_rev = _log_pos(q_rev) + log_bd_scale
 
         Delta_on_tilde = Delta_on[:, :, j] + (log_q_rev - log_q_fwd)
 
+        # [CHANGED] enforce eligibility_on (constraints)
         log_lam_on[:, :, j] = np.where(
-            ~m[:, :, j], log_beta + log_q_fwd + _logsigmoid(Delta_on_tilde), -np.inf
+            eligible_on[:, :, j],
+            log_beta + log_q_fwd + _logsigmoid(Delta_on_tilde),
+            -np.inf,
         )
 
     for i in range(Kmax):
+        di = int(slot_dim[i])
+        ti = int(slot_type[i])
+        phi_i = phi[:, :, i, :di]  # <-- [CHANGED] use slot_dim
+
+        # q_fwd for OFF (active -> inactive)
         if qb_eval_variant == "child":
             ctx_fwd = m.copy()
             ctx_fwd[:, :, i] = False
         else:
             ctx_fwd = m
-        q_fwd = qb_density_np(phi[:, :, i, :], ctx_fwd, phi, ps.rest)
+
+        #  pass slot metadata
+        q_fwd = qb_density_np(phi_i, ctx_fwd, phi, ps.rest, slot=i, slot_type=ti)
         log_q_fwd = _log_pos(q_fwd) + log_bd_scale
 
+        # q_rev for reverse ON at destination
         if qb_eval_variant == "child":
             ctx_rev = m.copy()
             ctx_rev[:, :, i] = True
         else:
             ctx_rev = m.copy()
             ctx_rev[:, :, i] = False
-        q_rev = qb_density_np(phi[:, :, i, :], ctx_rev, phi, ps.rest)
+
+        #  pass slot metadata
+        q_rev = qb_density_np(phi_i, ctx_rev, phi, ps.rest, slot=i, slot_type=ti)
         log_q_rev = _log_pos(q_rev) + log_bd_scale
 
         Delta_off_tilde = Delta_off[:, :, i] + (log_q_rev - log_q_fwd)
 
+        #  enforce eligibility_off (constraints)
         log_lam_off[:, :, i] = np.where(
-            m[:, :, i], log_beta + log_q_fwd + _logsigmoid(Delta_off_tilde), -np.inf
+            eligible_off[:, :, i],
+            log_beta + log_q_fwd + _logsigmoid(Delta_off_tilde),
+            -np.inf,
         )
 
     assert not np.any(np.isfinite(log_lam_on[m])), "ON hazard finite where active"
