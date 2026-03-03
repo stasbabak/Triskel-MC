@@ -35,6 +35,44 @@ class PSState:
     rest: Optional[np.ndarray]  # (C, W, Drest) or None
     logpi: np.ndarray  # (C, W)
 
+    # Slot metadata (problem-defined)
+    slot_dim: np.ndarray   # (Kmax,) int, each <= d_max
+    slot_type: np.ndarray  # (Kmax,) int (or small dtype), user-defined labels
+
+    # Optional constraints (generic)
+    must_be_on: Optional[np.ndarray] = None   # (Kmax,) bool, e.g. noise True -> like noise params
+    can_toggle: Optional[np.ndarray] = None   # (Kmax,) bool, default all True
+
+    def __post_init__(self):
+        # Basic shape checks (keep lightweight; no heavy validation)
+        C, W, Kmax, d_max = self.phi.shape
+        assert self.m.shape == (C, W, Kmax)
+        assert self.logpi.shape == (C, W)
+        assert self.slot_dim.shape == (Kmax,)
+        assert self.slot_type.shape == (Kmax,)
+
+        if self.must_be_on is not None:
+            assert self.must_be_on.shape == (Kmax,)
+        if self.can_toggle is not None:
+            assert self.can_toggle.shape == (Kmax,)
+
+        # Helpful defaults
+        if self.can_toggle is None:
+            self.can_toggle = np.ones((Kmax,), dtype=bool)
+
+        # Enforce must_be_on invariant immediately (so "noise is always on" works)
+        if self.must_be_on is not None:
+            self.m[..., self.must_be_on] = True
+
+
+    def slot_view(phi: np.ndarray, j: int, slot_dim: np.ndarray) -> np.ndarray:
+        """
+        View of slot j with its effective dimension.
+        Works on any leading batch dims, e.g. (C,W,Kmax,d_max) or (Kmax,d_max).
+        """
+        return phi[..., j, : int(slot_dim[j])]
+
+
 
 @dataclass
 class BDEvent:
