@@ -46,26 +46,27 @@ _LL_HARD_MIN = -1e12  # flag very bad LL                               # ### ADD
 DO_PSEUDO_REFRESH = True  # set True to enable
 
 
-def recompute_logpi(ps, pt_ll, betas, log_prior_phi_np, log_pseudo_phi_np, log_p_k_np):
+def recompute_logpi(ps: PSState, pt_ll: np.ndarray, betas: np.ndarray,
+                    log_prior_phi_np, log_pseudo_phi_np, log_p_mask_np) -> np.ndarray:
     phi, m = ps.phi, ps.m
-    C, W, Kmax, d = phi.shape
+    slot_dim  = ps.slot_dim
+    slot_type = ps.slot_type
+    must_be_on = ps.must_be_on
+    can_change = ps.can_change
 
+    C, W, Kmax, dmax = phi.shape ### assume that each slot is padded to maximim dimension
     comp = np.zeros((C, W), dtype=np.float64)
+
     for j in range(Kmax):
-        comp += np.where(
-            m[:, :, j],
-            np.vectorize(log_prior_phi_np,  signature="(d)->()")(phi[:, :, j, :]),
-            np.vectorize(log_pseudo_phi_np, signature="(d)->()")(phi[:, :, j, :]),
-        )
+        dj = int(slot_dim[j])
+        tj = int(slot_type[j])
+        phi_j = phi[:, :, j, :dj]
+        logp   = np.vectorize(lambda v: log_prior_phi_np(v, tj), signature="(d)->()")(phi_j)
+        logpsi = np.vectorize(lambda v: log_pseudo_phi_np(v, tj), signature="(d)->()")(phi_j)
+        comp += np.where(m[:, :, j], logp, logpsi)
 
-    k = m.astype(np.int32).sum(axis=-1)  # (C,W)
-    comb = (
-        log_p_k_np(k)
-        + _log_uniform_masks_given_k(Kmax, k)
-        + _log_symmetrization(k)
-    )
-
-    return comp + comb + betas[:, None] * pt_ll
+    logpm = log_p_mask_np(m, slot_type, must_be_on, can_change)  # (C,W)
+    return (logpm + comp + betas[:, None] * pt_ll).astype(np.float64)
 
 def run_ct_mcmc(
     *,
@@ -84,9 +85,18 @@ def run_ct_mcmc(
         [np.ndarray, np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray
     ],
     qb_eval_variant: Literal["child", "parent"],
-    log_prior_phi_np: Callable[[np.ndarray], float],
-    log_pseudo_phi_np: Callable[[np.ndarray], float],
-    log_p_k_np: Callable[[np.ndarray], np.ndarray],  # vectorized over k (C,W) -> (C,W)
+
+    log_prior_phi_np: Callable[[np.ndarray, int], float],          # (phi_j, type_j) -> float
+    log_pseudo_phi_np: Callable[[np.ndarray, int], float],         # (phi_j, type_j) -> float
+
+    # >>>  generic mask prior
+    log_p_mask_np: Callable[
+        [np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]],
+        np.ndarray
+    ],  # (m, slot_type, must_be_on, can_change) -> (C,W)
+
+
+    # log_p_k_np: Callable[[np.ndarray], np.ndarray],  # vectorized over k (C,W) -> (C,W)
     # masked-likelihood (JAX, single-config) -> scalar
     log_lik_masked_jax: Callable[
         [jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray
@@ -133,11 +143,29 @@ def run_ct_mcmc(
         np.array(pt_init.thetas, copy=True), np.array(pt_init.log_probs, copy=True)
     )
     ps = PSState(
-        np.array(ps_init.phi, copy=True),
-        np.array(ps_init.m, copy=True),
-        None if ps_init.rest is None else np.array(ps_init.rest, copy=True),
-        np.array(ps_init.logpi, copy=True),
+        phi=np.array(ps_init.phi, copy=True),
+        m=np.array(ps_init.m, copy=True),
+        rest=None if ps_init.rest is None else np.array(ps_init.rest, copy=True),
+        logpi=np.array(ps_init.logpi, copy=True),
+
+        # >>> NEW: preserve slot metadata
+        slot_dim=np.array(ps_init.slot_dim, copy=True),
+        slot_type=np.array(ps_init.slot_type, copy=True),
+        must_be_on=None if ps_init.must_be_on is None else np.array(ps_init.must_be_on, copy=True),
+        can_change=None if ps_init.can_change is None else np.array(ps_init.can_change, copy=True),
     )
+
+    def _ps_cw_view(ps: PSState, c: int, w: int) -> PSState:
+        return PSState(
+            phi=ps.phi[c:c+1, w:w+1],
+            m=ps.m[c:c+1, w:w+1],
+            rest=None if ps.rest is None else ps.rest[c:c+1, w:w+1],
+            logpi=ps.logpi[c:c+1, w:w+1],
+            slot_dim=ps.slot_dim,
+            slot_type=ps.slot_type,
+            must_be_on=ps.must_be_on,
+            can_change=ps.can_change,
+        )
 
     # Ensure pt.log_probs stores the *masked log-likelihood* (not full log posterior)
     # Recompute if pt_init.log_probs is missing/stale.
@@ -166,7 +194,16 @@ def run_ct_mcmc(
     if DO_PSEUDO_REFRESH:
         idxs = np.argwhere(~ps.m)  # (n_inactive, 3) over (c,w,slot)
         for c_i, w_i, j_i in idxs:
-            ps.phi[c_i, w_i, j_i, :] = sample_pseudo_phi()
+            # if ps.can_change is not None and (not bool(ps.can_change[j_i])):
+            #     continue
+            dj = int(ps.slot_dim[j_i])
+            draw = sample_pseudo_phi()          # assumed length >= dj (or exactly dj)
+            ps.phi[c_i, w_i, j_i, :dj] = draw[:dj]
+            ps.phi[c_i, w_i, j_i, dj:] = 0.0
+        ps.logpi[...] = recompute_logpi(ps, pt.log_probs, betas,
+                                    log_prior_phi_np, log_pseudo_phi_np, log_p_mask_np)
+
+
     T_bd = np.full((C, W), np.inf, dtype=np.float64)
     if DO_BD:
         _, _, lam_total, _ = compute_bd_hazards_all(
@@ -176,7 +213,7 @@ def run_ct_mcmc(
             qb_eval_variant=qb_eval_variant,
             log_prior_phi_np=log_prior_phi_np,
             log_pseudo_phi_np=log_pseudo_phi_np,
-            log_p_k_np=log_p_k_np,
+            log_p_mask_np=log_p_mask_np,
             batched_loglik_masked=batched_ll_masked,
             bd_rate_scale=bd_rate_scale,
         )
@@ -228,20 +265,13 @@ def run_ct_mcmc(
 
                     log_lam_on_cw, log_lam_off_cw, _, _ = (
                         compute_bd_hazards_all(  # <<< CHANGED
-                            PSState(
-                                ps.phi[c_min : c_min + 1, w_min : w_min + 1],
-                                ps.m[c_min : c_min + 1, w_min : w_min + 1],
-                                None
-                                if ps.rest is None
-                                else ps.rest[c_min : c_min + 1, w_min : w_min + 1],
-                                ps.logpi[c_min : c_min + 1, w_min : w_min + 1],
-                            ),
+                            _ps_cw_view(ps, c_min, w_min),
                             betas[c_min : c_min + 1],
                             qb_density_np=qb_density_np,
                             qb_eval_variant=qb_eval_variant,
                             log_prior_phi_np=log_prior_phi_np,
                             log_pseudo_phi_np=log_pseudo_phi_np,
-                            log_p_k_np=lambda k: log_p_k_np(k).reshape(1, 1),
+                            log_p_mask_np=log_p_mask_np,
                             batched_loglik_masked=batched_ll_masked,
                             bd_rate_scale=bd_rate_scale,
                         )
@@ -261,37 +291,44 @@ def run_ct_mcmc(
                     m_cw_now = ps.m[c_min, w_min].astype(bool)  # (Kmax,)   <-- ADDED
                     phi_cw_now = ps.phi[c_min, w_min].copy()  # (Kmax,d)  <-- ADDED
 
-                    def tempered_logpi_single(phi_cw, m_cw, rest_cw, beta_c):
-                        # masked LL
-                        ll_here = batched_ll_masked(
-                            phi_cw[None, ...],
-                            m_cw[None, ...],
-                            None if rest_cw is None else rest_cw[None, ...],
-                        )[0]
-                        # component + combinatorics
+                    def tempered_logpi_single(phi_cw: np.ndarray, m_cw: np.ndarray, beta_c: float) -> tuple[float, float, float]:
+                        """
+                        phi_cw: (Kmax, dmax) padded
+                        m_cw:   (Kmax,) bool
+                        returns: (logpi_tempered, ll, logpi_unscaled)
+                        """
+                        # masked LL (no rest in current PSState design)
+                        ll_here = float(
+                            batched_ll_masked(
+                                phi_cw[None, ...],
+                                m_cw[None, ...],
+                                None if ps.rest is None else ps.rest[c_min, w_min][None, ...],  # <<< CHANGE
+                            )[0]
+                        )
+
+                        # component terms: sum_j log p(phi_j|type_j) if active else log pseudo
                         comp = 0.0
-                        for i in range(phi_cw.shape[0]):  # Kmax
-                            comp += (
-                                log_prior_phi_np(phi_cw[i])
-                                if m_cw[i]
-                                else log_pseudo_phi_np(phi_cw[i])
-                            )
-                        k_here = int(m_cw.astype(np.int32).sum())
-                        comb = (
-                            float(log_p_k_np(np.array([[k_here]])).reshape(()))
-                            + float(
-                                _log_uniform_masks_given_k(
-                                    phi_cw.shape[0], np.array(k_here)
-                                )
-                            )
-                            + float(_log_symmetrization(np.array(k_here)))
+                        Kmax = phi_cw.shape[0]
+                        for j in range(Kmax):
+                            dj = int(ps.slot_dim[j])
+                            tj = int(ps.slot_type[j])
+                            vj = phi_cw[j, :dj]
+                            comp += float(log_prior_phi_np(vj, tj) if m_cw[j] else log_pseudo_phi_np(vj, tj))
+
+                        # mask prior
+                        logpm = float(
+                            log_p_mask_np(
+                                m_cw[None, None, :],   # (1,1,Kmax)
+                                ps.slot_type,          # (Kmax,)
+                                ps.must_be_on,         # (Kmax,) or None
+                                ps.can_change,         # (Kmax,) or None
+                            ).reshape(())
                         )
-                        logpi_unscaled = comb + comp
-                        return (
-                            float(logpi_unscaled + beta_c * ll_here),
-                            float(ll_here),
-                            float(logpi_unscaled),
-                        )
+
+                        logpi_unscaled = logpm + comp
+                        logpi_tempered = logpi_unscaled + beta_c * ll_here
+                        return float(logpi_tempered), float(ll_here), float(logpi_unscaled)
+
 
                     beta_c = float(betas[c_min])
                     phi_cw_now = ps.phi[c_min, w_min].copy()  # (Kmax,d)
@@ -300,9 +337,7 @@ def run_ct_mcmc(
                         None if ps.rest is None else ps.rest[c_min, w_min].copy()
                     )
 
-                    logpi_cur_tempered, ll_cur, logpi_cur_unscaled = (
-                        tempered_logpi_single(phi_cw_now, m_cw_now, rest_cw_now, beta_c)
-                    )
+                    logpi_cur_tempered, ll_cur, logpi_cur_unscaled = tempered_logpi_single(phi_cw_now, m_cw_now, beta_c)
 
                     bad_on = np.any(
                         np.isfinite(log_lam_on_cw[m_cw_now]), axis=None
@@ -367,6 +402,16 @@ def run_ct_mcmc(
 
                     log_lam_used = float(log_hazard_vec[idx])  # <<< NEW
 
+                    # if (ps.can_change is not None) and (not bool(ps.can_change[slot])):
+                    #     # slot cannot toggle at all
+                    #     T_bd[c_min, w_min] = np.inf
+                    #     continue
+
+                    if (not chosen_is_on) and (ps.must_be_on is not None) and bool(ps.must_be_on[slot]):
+                        # death forbidden for this slot
+                        T_bd[c_min, w_min] = np.inf
+                        continue
+
                     # apply BD toggle
                     phi_new = ps.phi.copy()
                     m_new = ps.m.copy()
@@ -389,21 +434,34 @@ def run_ct_mcmc(
 
                     # component & combinatorial terms
                     comp = 0.0
-                    for i in range(Kmax):
-                        if m_new[c_min, w_min, i]:
-                            comp += float(log_prior_phi_np(phi_new[c_min, w_min, i]))
-                        else:
-                            comp += float(log_pseudo_phi_np(phi_new[c_min, w_min, i]))
-                    k_cur = int(m_new[c_min, w_min].astype(np.int32).sum())
-                    comb = (
-                        float(log_p_k_np(np.array([[k_cur]])).reshape(()))
-                        + float(_log_uniform_masks_given_k(Kmax, np.array(k_cur)))
-                        + float(_log_symmetrization(np.array(k_cur)))
-                    )
-                    logpi_cw = comb + comp + float(betas[c_min] * ll_new)
+                    for j in range(Kmax):
+                        dj = int(ps.slot_dim[j])
+                        tj = int(ps.slot_type[j])
+                        vj = phi_new[c_min, w_min, j, :dj]
+                        comp += float(log_prior_phi_np(vj, tj) if m_new[c_min, w_min, j] else log_pseudo_phi_np(vj, tj))
 
+                    # mask prior (generic)
+                    logpm = float(
+                        log_p_mask_np(
+                            m_new[c_min, w_min][None, None, :],   # (1,1,Kmax)  <<< FIX
+                            ps.slot_type,
+                            ps.must_be_on,
+                            ps.can_change,
+                        ).reshape(())
+                    )
+
+                    logpi_cw = logpm + comp + float(betas[c_min] * ll_new)
+
+                    # rebuild ps (KEEP metadata!)
                     ps = PSState(
-                        phi=phi_new, m=m_new, rest=ps.rest, logpi=ps.logpi.copy()
+                        phi=phi_new,
+                        m=m_new,
+                        rest=ps.rest,
+                        logpi=ps.logpi.copy(),
+                        slot_dim=ps.slot_dim,
+                        slot_type=ps.slot_type,
+                        must_be_on=ps.must_be_on,
+                        can_change=ps.can_change,
                     )
                     ps.logpi[c_min, w_min] = logpi_cw
 
@@ -412,27 +470,21 @@ def run_ct_mcmc(
 
                     # Also sync PT θ for the affected slot so proposals start from PS state
                     sl = slot_slices[slot]  # slice/mask in θ-space for this φ_slot
-                    pt.thetas[c_min, w_min, sl] = phi_new[c_min, w_min, slot, :]
+                    dj = int(ps.slot_dim[slot])
+                    pt.thetas[c_min, w_min, sl] = phi_new[c_min, w_min, slot, :dj]
 
                     # ------------------- BD DEBUG (post-event) --------------------  # ### ADDED
                     if _DO_BD_DB_CHECK:  # ### ADDED
                         # recompute single-chain hazards at NEW state
                         log_lam_on_new, log_lam_off_new, _, _ = (
                             compute_bd_hazards_all(  # <<< CHANGED
-                                PSState(
-                                    ps.phi[c_min : c_min + 1, w_min : w_min + 1],
-                                    ps.m[c_min : c_min + 1, w_min : w_min + 1],
-                                    None
-                                    if ps.rest is None
-                                    else ps.rest[c_min : c_min + 1, w_min : w_min + 1],
-                                    ps.logpi[c_min : c_min + 1, w_min : w_min + 1],
-                                ),
+                                _ps_cw_view(ps, c_min, w_min),
                                 betas[c_min : c_min + 1],
                                 qb_density_np=qb_density_np,
                                 qb_eval_variant=qb_eval_variant,
                                 log_prior_phi_np=log_prior_phi_np,
                                 log_pseudo_phi_np=log_pseudo_phi_np,
-                                log_p_k_np=lambda k: log_p_k_np(k).reshape(1, 1),
+                                log_p_mask_np=log_p_mask_np,
                                 batched_loglik_masked=batched_ll_masked,
                                 bd_rate_scale=bd_rate_scale,
                             )
@@ -502,32 +554,36 @@ def run_ct_mcmc(
                     # advance "now" to this BD time for subsequent events
                     t = t_bd
                     if DO_PSEUDO_REFRESH and (not chosen_is_on):  # we just did a death
-                        old_phi = ps.phi[c_min, w_min, slot, :].copy()
-                        new_phi = sample_pseudo_phi()
-                        ps.phi[c_min, w_min, slot, :] = new_phi
-                        sl = slot_slices[slot]
-                        pt.thetas[c_min, w_min, sl] = new_phi  ### TODO: Do I need this?
-                        # keep cached tempered logπ consistent (optional)
-                        ps.logpi[c_min, w_min] += log_pseudo_phi_np(
-                            new_phi
-                        ) - log_pseudo_phi_np(old_phi)
+
+                        dj = int(ps.slot_dim[slot])
+                        tj = int(ps.slot_type[slot])
+
+                        old_v = ps.phi[c_min, w_min, slot, :dj].copy()
+                        draw = sample_pseudo_phi()
+                        new_v = np.asarray(draw[:dj], dtype=ps.phi.dtype)
+
+                        ps.phi[c_min, w_min, slot, :dj] = new_v
+                        ps.phi[c_min, w_min, slot, dj:] = 0.0
+                        ps.logpi[c_min, w_min] = float(
+                            recompute_logpi(
+                                _ps_cw_view(ps, c_min, w_min),
+                                pt.log_probs[c_min:c_min+1, w_min:w_min+1],
+                                betas[c_min:c_min+1],
+                                log_prior_phi_np,
+                                log_pseudo_phi_np,
+                                log_p_mask_np,
+                            )[0, 0]
+                        )
 
                     # redraw this chain's next absolute BD time from its new Λ(c,w)
                     _, _, lam_total_single, _ = compute_bd_hazards_all(
-                        PSState(
-                            ps.phi[c_min : c_min + 1, w_min : w_min + 1],
-                            ps.m[c_min : c_min + 1, w_min : w_min + 1],
-                            None
-                            if ps.rest is None
-                            else ps.rest[c_min : c_min + 1, w_min : w_min + 1],
-                            ps.logpi[c_min : c_min + 1, w_min : w_min + 1],
-                        ),
+                        _ps_cw_view(ps, c_min, w_min),
                         betas[c_min : c_min + 1],
                         qb_density_np=qb_density_np,
                         qb_eval_variant=qb_eval_variant,
                         log_prior_phi_np=log_prior_phi_np,
                         log_pseudo_phi_np=log_pseudo_phi_np,
-                        log_p_k_np=lambda k: log_p_k_np(k).reshape(1, 1),
+                        log_p_mask_np=log_p_mask_np,
                         batched_loglik_masked=batched_ll_masked,
                         bd_rate_scale=bd_rate_scale,
                     )
@@ -570,7 +626,7 @@ def run_ct_mcmc(
             )
             # keep cached logpi consistent for traces / swaps
             # ps.logpi[...] = pt.log_probs
-            ps.logpi[...] = recompute_logpi(ps, pt.log_probs, betas, log_prior_phi_np, log_pseudo_phi_np, log_p_k_np)
+            ps.logpi[...] = recompute_logpi(ps, pt.log_probs, betas, log_prior_phi_np, log_pseudo_phi_np, log_p_mask_np)
 
             # reset all BD clocks after MH (memoryless, and hazards may change via θ)
             # lam_on, lam_off, lam_total = compute_bd_hazards_all(
@@ -585,7 +641,11 @@ def run_ct_mcmc(
                 if DO_PSEUDO_REFRESH:
                     idxs = np.argwhere(~ps.m)  # (n_inactive, 3) over (c,w,slot)
                     for c_i, w_i, j_i in idxs:
-                        ps.phi[c_i, w_i, j_i, :] = sample_pseudo_phi()
+                        dj = int(ps.slot_dim[j_i])
+                        draw = sample_pseudo_phi()
+                        ps.phi[c_i, w_i, j_i, :dj] = np.asarray(draw[:dj], dtype=ps.phi.dtype)
+                        ps.phi[c_i, w_i, j_i, dj:] = 0.0
+                    ps.logpi[...] = recompute_logpi(ps, pt.log_probs, betas, log_prior_phi_np, log_pseudo_phi_np, log_p_mask_np)
 
                 _, _, lam_total, _ = compute_bd_hazards_all(
                     ps,
@@ -594,7 +654,7 @@ def run_ct_mcmc(
                     qb_eval_variant=qb_eval_variant,
                     log_prior_phi_np=log_prior_phi_np,
                     log_pseudo_phi_np=log_pseudo_phi_np,
-                    log_p_k_np=log_p_k_np,
+                    log_p_mask_np=log_p_mask_np,
                     batched_loglik_masked=batched_ll_masked,
                     bd_rate_scale=bd_rate_scale,
                 )
