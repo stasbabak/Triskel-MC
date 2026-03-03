@@ -53,6 +53,7 @@ def recompute_logpi(ps: PSState, pt_ll: np.ndarray, betas: np.ndarray,
     slot_type = ps.slot_type
     must_be_on = ps.must_be_on
     can_change = ps.can_change
+    can_toggle = ps.can_toggle
 
     C, W, Kmax, dmax = phi.shape ### assume that each slot is padded to maximim dimension
     comp = np.zeros((C, W), dtype=np.float64)
@@ -65,7 +66,8 @@ def recompute_logpi(ps: PSState, pt_ll: np.ndarray, betas: np.ndarray,
         logpsi = np.vectorize(lambda v: log_pseudo_phi_np(v, tj), signature="(d)->()")(phi_j)
         comp += np.where(m[:, :, j], logp, logpsi)
 
-    logpm = log_p_mask_np(m, slot_type, must_be_on, can_change)  # (C,W)
+    # logpm = log_p_mask_np(m, slot_type, must_be_on, can_change)  # (C,W)
+    logpm = log_p_mask_np(m, slot_type, must_be_on, can_toggle)  # (C,W)
     return (logpm + comp + betas[:, None] * pt_ll).astype(np.float64)
 
 def run_ct_mcmc(
@@ -153,6 +155,7 @@ def run_ct_mcmc(
         slot_type=np.array(ps_init.slot_type, copy=True),
         must_be_on=None if ps_init.must_be_on is None else np.array(ps_init.must_be_on, copy=True),
         can_change=None if ps_init.can_change is None else np.array(ps_init.can_change, copy=True),
+        can_toggle=None if ps_init.can_toggle is None else np.array(ps_init.can_toggle, copy=True),
     )
 
     def _ps_cw_view(ps: PSState, c: int, w: int) -> PSState:
@@ -164,6 +167,7 @@ def run_ct_mcmc(
             slot_dim=ps.slot_dim,
             slot_type=ps.slot_type,
             must_be_on=ps.must_be_on,
+            can_toggle= ps.can_toggle,
             can_change=ps.can_change,
         )
 
@@ -194,8 +198,6 @@ def run_ct_mcmc(
     if DO_PSEUDO_REFRESH:
         idxs = np.argwhere(~ps.m)  # (n_inactive, 3) over (c,w,slot)
         for c_i, w_i, j_i in idxs:
-            # if ps.can_change is not None and (not bool(ps.can_change[j_i])):
-            #     continue
             dj = int(ps.slot_dim[j_i])
             draw = sample_pseudo_phi()          # assumed length >= dj (or exactly dj)
             ps.phi[c_i, w_i, j_i, :dj] = draw[:dj]
@@ -321,7 +323,7 @@ def run_ct_mcmc(
                                 m_cw[None, None, :],   # (1,1,Kmax)
                                 ps.slot_type,          # (Kmax,)
                                 ps.must_be_on,         # (Kmax,) or None
-                                ps.can_change,         # (Kmax,) or None
+                                ps.can_toggle,         # (Kmax,) or None
                             ).reshape(())
                         )
 
@@ -446,7 +448,7 @@ def run_ct_mcmc(
                             m_new[c_min, w_min][None, None, :],   # (1,1,Kmax)  <<< FIX
                             ps.slot_type,
                             ps.must_be_on,
-                            ps.can_change,
+                            ps.can_toggle,
                         ).reshape(())
                     )
 
@@ -462,6 +464,7 @@ def run_ct_mcmc(
                         slot_type=ps.slot_type,
                         must_be_on=ps.must_be_on,
                         can_change=ps.can_change,
+                        can_toggle=ps.can_toggle,
                     )
                     ps.logpi[c_min, w_min] = logpi_cw
 
