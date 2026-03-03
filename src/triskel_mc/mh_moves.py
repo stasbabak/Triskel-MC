@@ -287,37 +287,6 @@ def _scatter_into(base: np.ndarray, data: np.ndarray, idx: tuple[np.ndarray, np.
 
 
 def gibbs_mh_sweep_active_np(
-    # rng: np.random.Generator,
-    # event_log,
-    # run_trace,
-    # t_abs,
-    # dt,
-    # # thetas,
-    # # lps,
-    # pt_state,
-    # ps_state,
-    # betas,
-    # # Kmax,
-    # slot_slices,
-    # Ls = None,
-    # U = None,
-    # S = None,
-    # do_stretch=True,
-    # do_rw_fullcov=True,
-    # do_rw_eigenline=True,
-    # do_rw_student_t=True,
-    # do_de=True,
-    # do_PTswap=True,
-    # qb_density_np=None,
-    # qb_eval_variant="child",
-    # log_prior_phi_np=None,
-    # # log_pseudo_phi_np=None,
-    # # log_p_k_np=None,
-    # batched_loglik_masked=None,
-    # bd_rate_scale=1.0,
-    # cross_rate=0.8,
-    # gamma_de=2.38,
-    # stretch_a=2.0,
     rng: np.random.Generator,
     *,
     t_abs,
@@ -346,9 +315,21 @@ def gibbs_mh_sweep_active_np(
 
     thetas, lps = pt_state.thetas, pt_state.log_probs
     Kmax = ps_state.m.shape[-1]
+    slot_dim  = ps_state.slot_dim          # NEW
+    slot_type = ps_state.slot_type         # NEW
+    can_change = ps_state.can_change       # NEW
 
-    def _slot_prior_np(phi_cwd: np.ndarray) -> np.ndarray:
-        return np.vectorize(log_prior_phi_np, signature="(d)->()")(phi_cwd)
+
+    def _slot_prior_np(phi_cwd: np.ndarray, tj: int) -> np.ndarray:   # CHANGED signature
+        # phi_cwd: (C,W,dj)
+        return np.vectorize(lambda v: log_prior_phi_np(v, tj), signature="(d)->()")(phi_cwd)
+
+    def _slot_prior_subset(phi_j_full: np.ndarray, idx_subset, tj: int) -> np.ndarray:  # CHANGED
+        c_idx, w_idx = idx_subset
+        if c_idx.size == 0:
+            return np.empty((0,), dtype=np.float64)
+        phi_subset = phi_j_full[c_idx, w_idx]  # (Nsel, dj)
+        return np.vectorize(lambda v: log_prior_phi_np(v, tj), signature="(d)->()")(phi_subset).astype(np.float64)
 
     def _masked_ll(phi: np.ndarray) -> np.ndarray:
         C, W, Kmax, d = phi.shape
@@ -372,24 +353,6 @@ def gibbs_mh_sweep_active_np(
         )
         return ll_subset, ll_full
 
-    def _slot_prior_subset(phi_j_full, idx_subset):
-        # c_idx, w_idx = idx_subset
-        # phi_subset = phi_j_full[c_idx, w_idx]
-        # prior_subset = np.vectorize(log_prior_phi_np, signature="(d)->()")(
-        #     phi_subset
-        # )
-        # prior_full = _scatter_into(
-        #     np.zeros((phi_j_full.shape[0], phi_j_full.shape[1])),
-        #     prior_subset,
-        #     idx_subset,
-        # )
-        # return prior_full
-        c_idx, w_idx = idx_subset
-        if c_idx.size == 0:
-            return np.empty((0,), dtype=np.float64)
-        phi_subset = phi_j_full[c_idx, w_idx]  # (Nsel, d)
-        return np.vectorize(log_prior_phi_np, signature="(d)->()")(phi_subset).astype(np.float64)
-
 
     C, W, D = thetas.shape
     # run_trace.begin_mh_tick(t_abs, dt)
@@ -406,15 +369,26 @@ def gibbs_mh_sweep_active_np(
             print("[warn] rw_eigenline disabled: non-orthogonal eigenvectors")
             do_rw_eigenline = False
 
+
+    # defaults if None
+    if can_change is None:                                      # NEW
+        can_change = np.ones((Kmax,), dtype=bool)               # NEW
+
     for j in range(Kmax):
         move_mask = ps_state.m[:, :, j].astype(bool)
         if not move_mask.any():
             continue
+
+        if not bool(can_change[j]):                             # NEW: freeze this slot under MH
+            continue
+
         slot_sel = slot_slices[j]
 
-        ll_cur = _masked_ll(ps_state.phi)  # (C,W)
-        lprior_cur_j = _slot_prior_np(ps_state.phi[:, :, j, :])  # (C,W)
-        # print (f'debug: phi shape {ps_state.phi[:, :, j, :].shape}, lprior: {lprior_cur_j.shape}')
+        dj = int(slot_dim[j])                                   # NEW
+        tj = int(slot_type[j])                                  # NEW
+
+        ll_cur = _masked_ll(ps_state.phi)                        # (C,W) (same)
+        lprior_cur_j = _slot_prior_np(ps_state.phi[:, :, j, :dj], tj)   # CHANGED: :dj + type
 
         if do_stretch:
             red, blue = redblue_mask_np(rng, C, W)
@@ -432,9 +406,13 @@ def gibbs_mh_sweep_active_np(
             attempt_mask = red & moved1
             c_idx, w_idx = _indices(attempt_mask)
 
+
             phi_prop = ps_state.phi.copy()
             if c_idx.size:
-                phi_prop[c_idx, w_idx, j, :] = prop1[c_idx, w_idx, slot_sel]
+                # CHANGED: only write active dims :dj
+                phi_prop[c_idx, w_idx, j, :dj] = prop1[c_idx, w_idx, slot_sel][..., :dj]
+                # NEW (recommended): keep padding clean
+                # phi_prop[c_idx, w_idx, j, dj:] = 0.0
 
             ll_prop = lps.copy()
             if c_idx.size:
@@ -443,7 +421,7 @@ def gibbs_mh_sweep_active_np(
 
             lprior_prop_j_full = lprior_cur_j.copy()
             if c_idx.size:
-                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :], (c_idx, w_idx))
+                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :dj], (c_idx, w_idx), tj)   # CHANGED
                 # print (f'debug , pj_sub shape = {pj_sub.shape}, lprior: {lprior_prop_j_full[c_idx, w_idx].shape}, l_prior_cur_j: {lprior_cur_j.shape}')
                 lprior_prop_j_full[c_idx, w_idx] = pj_sub
 
@@ -465,8 +443,10 @@ def gibbs_mh_sweep_active_np(
                 move_mask=attempt_mask,
             )
             thetas, lps = pt_state.thetas, pt_state.log_probs
-            ps_state.phi[:, :, j, :] = np.where(
-                accept[:, :, None], prop1[:, :, slot_sel], ps_state.phi[:, :, j, :]
+            ps_state.phi[:, :, j, :dj] = np.where(
+                accept[:, :, None],
+                prop1[:, :, slot_sel][..., :dj],
+                ps_state.phi[:, :, j, :dj],
             )
             ll_cur = np.where(accept, ll_prop, ll_cur)
             lprior_cur_j = np.where(accept, lprior_prop_j_full, lprior_cur_j)
@@ -492,7 +472,8 @@ def gibbs_mh_sweep_active_np(
 
             phi_prop = ps_state.phi.copy()
             if c_idx.size:
-                phi_prop[c_idx, w_idx, j, :] = prop2[c_idx, w_idx, slot_sel]
+                # CHANGED: only write active dims :dj
+                phi_prop[c_idx, w_idx, j, :dj] = prop1[c_idx, w_idx, slot_sel][..., :dj]
 
             ll_prop = ll_cur.copy()
             if c_idx.size:
@@ -501,7 +482,7 @@ def gibbs_mh_sweep_active_np(
 
             lprior_prop_j_full = lprior_cur_j.copy()
             if c_idx.size:
-                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :], (c_idx, w_idx))
+                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :dj], (c_idx, w_idx), tj)   # CHANGED
                 lprior_prop_j_full[c_idx, w_idx] = pj_sub
 
             pt_state, accept = apply_mh_and_record_np(
@@ -522,8 +503,10 @@ def gibbs_mh_sweep_active_np(
                 move_mask=attempt_mask,
             )
             thetas, lps = pt_state.thetas, pt_state.log_probs
-            ps_state.phi[:, :, j, :] = np.where(
-                accept[:, :, None], prop2[:, :, slot_sel], ps_state.phi[:, :, j, :]
+            ps_state.phi[:, :, j, :dj] = np.where(
+                accept[:, :, None],
+                prop1[:, :, slot_sel][..., :dj],
+                ps_state.phi[:, :, j, :dj],
             )
             ll_cur = np.where(accept, ll_prop, ll_cur)
             lprior_cur_j = np.where(accept, lprior_prop_j_full, lprior_cur_j)
@@ -543,7 +526,8 @@ def gibbs_mh_sweep_active_np(
 
             phi_prop = ps_state.phi.copy()
             if c_idx.size:
-                phi_prop[c_idx, w_idx, j, :] = prop[c_idx, w_idx, slot_sel]
+                # CHANGED: only write active dims :dj
+                phi_prop[c_idx, w_idx, j, :dj] = prop1[c_idx, w_idx, slot_sel][..., :dj]
 
             ll_prop = ll_cur.copy()
             if c_idx.size:
@@ -552,7 +536,7 @@ def gibbs_mh_sweep_active_np(
 
             lprior_prop_j_full = lprior_cur_j.copy()
             if c_idx.size:
-                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :], (c_idx, w_idx))
+                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :dj], (c_idx, w_idx), tj)   # CHANGED
                 lprior_prop_j_full[c_idx, w_idx] = pj_sub
 
             zeros = np.zeros((C, W), dtype=np.float64)
@@ -574,8 +558,10 @@ def gibbs_mh_sweep_active_np(
                 move_mask=attempt_mask,
             )
             thetas, lps = pt_state.thetas, pt_state.log_probs
-            ps_state.phi[:, :, j, :] = np.where(
-                accept[:, :, None], prop[:, :, slot_sel], ps_state.phi[:, :, j, :]
+            ps_state.phi[:, :, j, :dj] = np.where(
+                accept[:, :, None],
+                prop1[:, :, slot_sel][..., :dj],
+                ps_state.phi[:, :, j, :dj],
             )
             ll_cur = np.where(accept, ll_prop, ll_cur)
             lprior_cur_j = np.where(accept, lprior_prop_j_full, lprior_cur_j)
@@ -595,7 +581,8 @@ def gibbs_mh_sweep_active_np(
 
             phi_prop = ps_state.phi.copy()
             if c_idx.size:
-                phi_prop[c_idx, w_idx, j, :] = prop[c_idx, w_idx, slot_sel]
+                # CHANGED: only write active dims :dj
+                phi_prop[c_idx, w_idx, j, :dj] = prop1[c_idx, w_idx, slot_sel][..., :dj]
 
             ll_prop = ll_cur.copy()
             if c_idx.size:
@@ -604,7 +591,7 @@ def gibbs_mh_sweep_active_np(
 
             lprior_prop_j_full = lprior_cur_j.copy()
             if c_idx.size:
-                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :], (c_idx, w_idx))
+                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :dj], (c_idx, w_idx), tj)   # CHANGED
                 lprior_prop_j_full[c_idx, w_idx] = pj_sub
 
             zeros = np.zeros((C, W), dtype=np.float64)
@@ -626,8 +613,10 @@ def gibbs_mh_sweep_active_np(
                 move_mask=attempt_mask,
             )
             thetas, lps = pt_state.thetas, pt_state.log_probs
-            ps_state.phi[:, :, j, :] = np.where(
-                accept[:, :, None], prop[:, :, slot_sel], ps_state.phi[:, :, j, :]
+            ps_state.phi[:, :, j, :dj] = np.where(
+                accept[:, :, None],
+                prop1[:, :, slot_sel][..., :dj],
+                ps_state.phi[:, :, j, :dj],
             )
             ll_cur = np.where(accept, ll_prop, ll_cur)
             lprior_cur_j = np.where(accept, lprior_prop_j_full, lprior_cur_j)
@@ -647,7 +636,8 @@ def gibbs_mh_sweep_active_np(
 
             phi_prop = ps_state.phi.copy()
             if c_idx.size:
-                phi_prop[c_idx, w_idx, j, :] = prop[c_idx, w_idx, slot_sel]
+                # CHANGED: only write active dims :dj
+                phi_prop[c_idx, w_idx, j, :dj] = prop1[c_idx, w_idx, slot_sel][..., :dj]
 
             ll_prop = ll_cur.copy()
             if c_idx.size:
@@ -656,7 +646,7 @@ def gibbs_mh_sweep_active_np(
 
             lprior_prop_j_full = lprior_cur_j.copy()
             if c_idx.size:
-                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :], (c_idx, w_idx))
+                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :dj], (c_idx, w_idx), tj)   # CHANGED
                 lprior_prop_j_full[c_idx, w_idx] = pj_sub
 
             zeros = np.zeros((C, W), dtype=np.float64)
@@ -678,8 +668,10 @@ def gibbs_mh_sweep_active_np(
                 move_mask=attempt_mask,
             )
             thetas, lps = pt_state.thetas, pt_state.log_probs
-            ps_state.phi[:, :, j, :] = np.where(
-                accept[:, :, None], prop[:, :, slot_sel], ps_state.phi[:, :, j, :]
+            ps_state.phi[:, :, j, :dj] = np.where(
+                accept[:, :, None],
+                prop1[:, :, slot_sel][..., :dj],
+                ps_state.phi[:, :, j, :dj],
             )
 
             ll_cur = np.where(accept, ll_prop, ll_cur)
@@ -708,7 +700,8 @@ def gibbs_mh_sweep_active_np(
 
             phi_prop = ps_state.phi.copy()
             if c_idx.size:
-                phi_prop[c_idx, w_idx, j, :] = prop[c_idx, w_idx, slot_sel]
+                # CHANGED: only write active dims :dj
+                phi_prop[c_idx, w_idx, j, :dj] = prop1[c_idx, w_idx, slot_sel][..., :dj]
 
             ll_prop = ll_cur.copy()
             if c_idx.size:
@@ -717,7 +710,7 @@ def gibbs_mh_sweep_active_np(
 
             lprior_prop_j_full = lprior_cur_j.copy()
             if c_idx.size:
-                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :], (c_idx, w_idx))
+                pj_sub = _slot_prior_subset(phi_prop[:, :, j, :dj], (c_idx, w_idx), tj)   # CHANGED
                 lprior_prop_j_full[c_idx, w_idx] = pj_sub
 
             zeros = np.zeros((C, W), dtype=np.float64)
@@ -740,8 +733,10 @@ def gibbs_mh_sweep_active_np(
             )
 
             thetas, lps = pt_state.thetas, pt_state.log_probs
-            ps_state.phi[:, :, j, :] = np.where(
-                accept[:, :, None], prop[:, :, slot_sel], ps_state.phi[:, :, j, :]
+            ps_state.phi[:, :, j, :dj] = np.where(
+                accept[:, :, None],
+                prop1[:, :, slot_sel][..., :dj],
+                ps_state.phi[:, :, j, :dj],
             )
             ll_cur = np.where(accept, ll_prop, ll_cur)
             lprior_cur_j = np.where(accept, lprior_prop_j_full, lprior_cur_j)

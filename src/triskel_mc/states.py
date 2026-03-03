@@ -42,6 +42,7 @@ class PSState:
     # Optional constraints (generic)
     must_be_on: Optional[np.ndarray] = None   # (Kmax,) bool, e.g. noise True -> like noise params
     can_toggle: Optional[np.ndarray] = None   # (Kmax,) bool, default all True
+    can_change: Optional[np.ndarray] = None   # (Kmax,) bool, default all True -> can change under MH
 
     def __post_init__(self):
         # Basic shape checks (keep lightweight; no heavy validation)
