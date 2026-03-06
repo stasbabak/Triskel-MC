@@ -167,17 +167,14 @@ def compute_bd_hazards_all(
     """Compute hazards (lam_on, lam_off, lam_total) for ALL (c,w) in one shot."""
 
     phi, m, rest, logpi_cur = ps.phi, ps.m, ps.rest, ps.logpi
-    slot_dim  = ps.slot_dim
-    slot_type = ps.slot_type
+    slot_dim   = ps.slot_dim
+    slot_type  = ps.slot_type
     must_be_on = ps.must_be_on
     can_toggle = ps.can_toggle
 
-    if ps.must_be_on is not None:
-        ps.m |= ps.must_be_on[None, None, :]
-
     C, W, Kmax, d = phi.shape
     B = C * W
-    beta_cw = betas[:, None]  # (C,1)
+    beta_cw = betas[:, None]
     log_beta = np.log(np.clip(beta_cw, 1e-300, None))
 
     def _log_pos(x):
@@ -185,16 +182,24 @@ def compute_bd_hazards_all(
 
     log_bd_scale = np.log(max(bd_rate_scale, 1e-300))
 
-    ### I want some model to be always on (like noise model) and others can toggle (like signal)
-    # [CHANGED] defaults for constraints if None
     if must_be_on is None:
-        must_be_on = np.zeros((Kmax,), dtype=bool)
+        must_be_on = np.zeros(Kmax, dtype=bool)
     if can_toggle is None:
-        can_toggle = np.ones((Kmax,), dtype=bool)
+        can_toggle = np.ones(Kmax, dtype=bool)
+
+    bad = ~m[..., must_be_on]
+    if np.any(bad):
+        raise ValueError("Invariant violated: some must_be_on slots are off in PSState.")
+
+    eligible_on  = (~m) & can_toggle[None, None, :]
+    eligible_off = m & can_toggle[None, None, :]
+    eligible_off &= ~must_be_on[None, None, :]
+
+
 
     # [ADDED] eligibility masks (C,W,Kmax) enforcing constraints
-    eligible_on = (~m) & can_toggle[None, None, :] & (~must_be_on[None, None, :])
-    eligible_off = (m) & can_toggle[None, None, :] & (~must_be_on[None, None, :])
+    # eligible_on = (~m) & can_toggle[None, None, :] & (~must_be_on[None, None, :])
+    # eligible_off = (m) & can_toggle[None, None, :] & (~must_be_on[None, None, :])
 
     # ----- Build current-mask batch to compute current LL -----
     phi_cur = phi.reshape(B, Kmax, d)  # (B,Kmax,d)

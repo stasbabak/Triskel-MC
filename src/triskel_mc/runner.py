@@ -95,7 +95,7 @@ def run_ct_mcmc(
     log_p_mask_np: Callable[
         [np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]],
         np.ndarray
-    ],  # (m, slot_type, must_be_on, can_change) -> (C,W)
+    ],  # (m, slot_type, must_be_on, can_toggle) -> (C,W)
 
 
     log_lik_masked: Callable[
@@ -416,9 +416,10 @@ def run_ct_mcmc(
                     #     continue
 
                     if (not chosen_is_on) and (ps.must_be_on is not None) and bool(ps.must_be_on[slot]):
-                        # death forbidden for this slot
-                        T_bd[c_min, w_min] = np.inf
-                        continue
+                        raise RuntimeError(
+                            f"Impossible BD event: attempted death of must_be_on slot {slot} "
+                            f"at chain={c_min}, walker={w_min}"
+                        )
 
                     # apply BD toggle
                     phi_new = ps.phi.copy()

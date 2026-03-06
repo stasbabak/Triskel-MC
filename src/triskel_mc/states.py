@@ -52,18 +52,24 @@ class PSState:
         assert self.slot_dim.shape == (Kmax,)
         assert self.slot_type.shape == (Kmax,)
 
-        if self.must_be_on is not None:
-            assert self.must_be_on.shape == (Kmax,)
-        if self.can_toggle is not None:
-            assert self.can_toggle.shape == (Kmax,)
-
         # Helpful defaults
+        if self.must_be_on is None:
+            self.must_be_on = np.zeros((Kmax,), dtype=bool)
+        else:
+            self.must_be_on = np.asarray(self.must_be_on, dtype=bool)
+
         if self.can_toggle is None:
             self.can_toggle = np.ones((Kmax,), dtype=bool)
+        else:
+            self.can_toggle = np.asarray(self.can_toggle, dtype=bool)
 
-        # Enforce must_be_on invariant immediately (so "noise is always on" works)
-        if self.must_be_on is not None:
-            self.m[..., self.must_be_on] = True
+        if self.can_change is None:
+            self.can_change = np.ones((Kmax,), dtype=bool)
+        else:
+            self.can_change = np.asarray(self.can_change, dtype=bool)
+
+        # Enforce must_be_on invariant immediately
+        self.m[..., self.must_be_on] = True
 
 
     def slot_view(phi: np.ndarray, j: int, slot_dim: np.ndarray) -> np.ndarray:
