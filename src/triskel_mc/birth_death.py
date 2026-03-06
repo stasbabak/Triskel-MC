@@ -23,31 +23,62 @@ def _log_symmetrization(k: np.ndarray) -> np.ndarray:
     return -gammaln(k + 1.0)
 
 
-def make_batched_loglik_masked(
+def make_batched_loglik_masked_jax(
     log_lik_masked_jax: Callable[
-        [jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray
+        [jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray], jnp.ndarray, jnp.ndarray],
+        jnp.ndarray
     ],
 ):
-    """Return two JAX-compiled batched evaluators.
-        1) batched_cur(phi: (B,Kmax,d), m: (B,Kmax), rest: (B,Drest or 0)) -> (B,)
-        2) batched_off(phi: (B*Kmax,Kmax,d), m: (B*Kmax,Kmax), rest: (B*Kmax,Drest or 0)) -> (B*Kmax,)
+    # --- case 1: rest is provided, batched over B
+    f_with_rest = jax.jit(
+        jax.vmap(log_lik_masked_jax, in_axes=(0, 0, 0, None, None))
+    )
+
+    # --- case 2: rest is None (constant), do NOT vmap over rest
+    def _ll_no_rest(phi, m, slot_dim, slot_type):
+        return log_lik_masked_jax(phi, m, None, slot_dim, slot_type)
+
+    f_no_rest = jax.jit(
+        jax.vmap(_ll_no_rest, in_axes=(0, 0, None, None))
+    )
+
+    def batched(phi_b, m_b, rest_b, slot_dim, slot_type):
+        phi_b = jnp.asarray(phi_b)
+        m_b = jnp.asarray(m_b)
+        slot_dim = jnp.asarray(slot_dim)
+        slot_type = jnp.asarray(slot_type)
+
+        if rest_b is None:
+            out = f_no_rest(phi_b, m_b, slot_dim, slot_type)
+        else:
+            out = f_with_rest(phi_b, m_b, jnp.asarray(rest_b), slot_dim, slot_type)
+
+        return np.asarray(out)
+
+    return batched
+
+
+def make_batched_loglik_masked_np(
+    log_lik_masked_np: Callable[
+        [np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray],
+        float
+    ]
+):
     """
-
-    f = jax.jit(
-        jax.vmap(log_lik_masked_jax, in_axes=(0, 0, 0))
-    )  # batch over first axis
-
-    def batched(
-        phi_b: np.ndarray, m_b: np.ndarray, rest_b: Optional[np.ndarray]
-    ) -> np.ndarray:
-        return np.array(
-            f(
-                jnp.asarray(phi_b),
-                jnp.asarray(m_b),
-                None if rest_b is None else jnp.asarray(rest_b),
-            )
-        )
-
+    Returns:
+      batched(phi_b, m_b, rest_b, slot_dim, slot_type) -> (B,)
+    Pure NumPy loop (safe, simple). You can optimize later.
+    """
+    def batched(phi_b, m_b, rest_b, slot_dim, slot_type):
+        B = phi_b.shape[0]
+        out = np.empty((B,), dtype=np.float64)
+        if rest_b is None:
+            for b in range(B):
+                out[b] = float(log_lik_masked_np(phi_b[b], m_b[b], None, slot_dim, slot_type))
+        else:
+            for b in range(B):
+                out[b] = float(log_lik_masked_np(phi_b[b], m_b[b], rest_b[b], slot_dim, slot_type))
+        return out
     return batched
 
 
@@ -77,10 +108,12 @@ def make_batched_loglik_masked(
 
 
 def masked_ll_for_phi_batch(
-    phi: np.ndarray,  # (C,W,Kmax,d)
-    m: np.ndarray,  # (C,W,Kmax) bool
+    phi: np.ndarray,
+    m: np.ndarray,
     rest: np.ndarray | None,
-    batched_loglik_masked,  # fn(B,Kmax,d),(B,Kmax),(B,Drest|) -> (B,)
+    batched_loglik_masked,
+    slot_dim: np.ndarray,
+    slot_type: np.ndarray,
 ) -> np.ndarray:
     C, W, Kmax, d = phi.shape
     B = C * W
@@ -88,9 +121,10 @@ def masked_ll_for_phi_batch(
         phi.reshape(B, Kmax, d),
         m.reshape(B, Kmax),
         None if rest is None else rest.reshape(B, -1),
+        slot_dim,
+        slot_type,
     ).reshape(C, W)
     return np.asarray(ll, dtype=np.float64)
-
 
 def _logsigmoid(x):
     # -softplus(-x)
@@ -126,7 +160,7 @@ def compute_bd_hazards_all(
     log_prior_phi_np: Callable[[np.ndarray, int], float],
     log_pseudo_phi_np: Callable[[np.ndarray, int], float],
     log_p_mask_np: Callable[[np.ndarray, np.ndarray, Optional[np.ndarray], Optional[np.ndarray]], np.ndarray], ##(C, W)
-    batched_loglik_masked: Callable[[np.ndarray, np.ndarray, Optional[np.ndarray]], np.ndarray],
+    batched_loglik_masked: Callable[[np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray], np.ndarray],
     bd_rate_scale=1.0,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
 
@@ -137,6 +171,9 @@ def compute_bd_hazards_all(
     slot_type = ps.slot_type
     must_be_on = ps.must_be_on
     can_toggle = ps.can_toggle
+
+    if ps.must_be_on is not None:
+        ps.m |= ps.must_be_on[None, None, :]
 
     C, W, Kmax, d = phi.shape
     B = C * W
@@ -164,7 +201,7 @@ def compute_bd_hazards_all(
     m_cur = m.reshape(B, Kmax)  # (B,Kmax)
     rest_cur = None if rest is None else rest.reshape(B, -1)
 
-    ll_cur = batched_loglik_masked(phi_cur, m_cur, rest_cur)  # (B,)
+    ll_cur = batched_loglik_masked(phi_cur, m_cur, rest_cur, slot_dim, slot_type)   # (B,)
     ll_cur = ll_cur.reshape(C, W)
 
     # ----- Build "turn OFF i" batches -----
@@ -180,9 +217,7 @@ def compute_bd_hazards_all(
     m_off_flat = m_off.reshape(B * Kmax, Kmax)
     rest_off_flat = None if rest_off is None else rest_off.reshape(B * Kmax, -1)
 
-    ll_off_flat = batched_loglik_masked(
-        phi_off_flat, m_off_flat, rest_off_flat
-    )  # (B*Kmax,)
+    ll_off_flat = batched_loglik_masked(phi_off_flat, m_off_flat, rest_off_flat, slot_dim, slot_type)  # (B*Kmax,)
     ll_off = ll_off_flat.reshape(C, W, Kmax)  # (C,W,Kmax)
 
     # --- build "turn ON j" batches (mirror of OFF) ---
@@ -197,9 +232,7 @@ def compute_bd_hazards_all(
     phi_on_flat = phi_on.reshape(B * Kmax, Kmax, d)
     m_on_flat = m_on.reshape(B * Kmax, Kmax)
     rest_on_flat = None if rest_on is None else rest_on.reshape(B * Kmax, -1)
-    ll_on_flat = batched_loglik_masked(
-        phi_on_flat, m_on_flat, rest_on_flat
-    )  # (B*Kmax,)
+    ll_on_flat  = batched_loglik_masked(phi_on_flat,  m_on_flat,  rest_on_flat,  slot_dim, slot_type)  # (B*Kmax,)
     ll_on = ll_on_flat.reshape(C, W, Kmax)  # (C,W,Kmax)
 
     # ----- per-slot prior/pseudo with true slot dimension and slot type

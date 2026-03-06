@@ -98,11 +98,11 @@ def run_ct_mcmc(
     ],  # (m, slot_type, must_be_on, can_change) -> (C,W)
 
 
-    # log_p_k_np: Callable[[np.ndarray], np.ndarray],  # vectorized over k (C,W) -> (C,W)
-    # masked-likelihood (JAX, single-config) -> scalar
-    log_lik_masked_jax: Callable[
-        [jnp.ndarray, jnp.ndarray, Optional[jnp.ndarray]], jnp.ndarray
-    ],
+    log_lik_masked: Callable[
+    [np.ndarray, np.ndarray, Optional[np.ndarray], np.ndarray, np.ndarray],
+    float]
+    # (phi_one, m_one, rest_one, slot_dim, slot_type) -> scalar float
+
     # θ slot mapping (length Kmax): each element is a slice or a bool mask over D
     slot_slices: Tuple,
     ### scale for BD rate
@@ -134,7 +134,9 @@ def run_ct_mcmc(
     """
 
     rng = np.random.default_rng(seed)
-    batched_ll_masked = make_batched_loglik_masked(log_lik_masked_jax)
+    # batched_ll_masked = make_batched_loglik_masked_jax(log_lik_masked_jax)
+    batched_ll_masked = make_batched_loglik_masked_np(log_lik_masked_np)
+
     DO_BD = float(bd_rate_scale) > 0.0
 
     C, W, D = pt_init.thetas.shape
@@ -181,6 +183,8 @@ def run_ct_mcmc(
                 ps.phi.reshape(B, Kmax, D),
                 ps.m.reshape(B, Kmax),
                 None if ps.rest is None else ps.rest.reshape(B, -1),
+                ps.slot_dim,
+                ps.slot_type,
             )
             .reshape(C, W)
             .astype(np.float64)
@@ -305,6 +309,8 @@ def run_ct_mcmc(
                                 phi_cw[None, ...],
                                 m_cw[None, ...],
                                 None if ps.rest is None else ps.rest[c_min, w_min][None, ...],  # <<< CHANGE
+                                ps.slot_dim,
+                                ps.slot_type,
                             )[0]
                         )
 
@@ -432,7 +438,7 @@ def run_ct_mcmc(
                         None if ps.rest is None else ps.rest[c_min, w_min][None, ...]
                     )
 
-                    ll_new = batched_ll_masked(phi_cw, m_cw, rest_cw)[0]
+                    ll_new = batched_ll_masked(phi_cw, m_cw, rest_cw, ps.slot_dim, ps.slot_type,)[0]
 
                     # component & combinatorial terms
                     comp = 0.0

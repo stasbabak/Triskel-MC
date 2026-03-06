@@ -337,6 +337,8 @@ def gibbs_mh_sweep_active_np(
             phi.reshape(C * W, Kmax, d),
             ps_state.m.reshape(C * W, Kmax),
             None if ps_state.rest is None else ps_state.rest.reshape(C * W, -1),
+            ps_state.slot_dim,
+            ps_state.slot_type,
         ).reshape(C, W)
         return np.asarray(ll, dtype=np.float64)
 
@@ -345,7 +347,10 @@ def gibbs_mh_sweep_active_np(
         phi_subset = phi_full[c_idx, w_idx]
         m_subset = m_full[c_idx, w_idx]
         rest_subset = None if rest_full is None else rest_full[c_idx, w_idx]
-        ll_subset = batched_loglik_masked(phi_subset, m_subset, rest_subset)
+        ll_subset = batched_loglik_masked(
+            phi_subset, m_subset, rest_subset,
+            ps_state.slot_dim, ps_state.slot_type
+        )
         ll_full = _scatter_into(
             np.zeros((phi_full.shape[0], phi_full.shape[1])),
             ll_subset,
