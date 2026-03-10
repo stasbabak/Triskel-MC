@@ -11,7 +11,7 @@ from .birth_death import (
     _log_symmetrization,
     _log_uniform_masks_given_k,
     compute_bd_hazards_all,
-    make_batched_loglik_masked,
+    make_batched_loglik_masked_np,
 )
 from .mh_moves import gibbs_mh_sweep_active_np
 from .states import EventLog, PTState, PSState, RunTrace, TraceConfig, BDEvent, MHEvent
@@ -135,7 +135,7 @@ def run_ct_mcmc(
 
     rng = np.random.default_rng(seed)
     # batched_ll_masked = make_batched_loglik_masked_jax(log_lik_masked_jax)
-    batched_ll_masked = make_batched_loglik_masked_np(log_lik_masked_np)
+    batched_ll_masked = make_batched_loglik_masked_np(log_lik_masked)
 
     DO_BD = float(bd_rate_scale) > 0.0
 

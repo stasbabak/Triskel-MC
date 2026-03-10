@@ -53,22 +53,34 @@ class PSState:
         assert self.slot_type.shape == (Kmax,)
 
         # Helpful defaults
+
         if self.must_be_on is None:
             self.must_be_on = np.zeros((Kmax,), dtype=bool)
         else:
             self.must_be_on = np.asarray(self.must_be_on, dtype=bool)
+            if self.must_be_on.shape != (Kmax,):
+                raise ValueError(
+                    f"must_be_on must have shape {(Kmax,)}, got {self.must_be_on.shape}"
+                )
 
         if self.can_toggle is None:
             self.can_toggle = np.ones((Kmax,), dtype=bool)
         else:
             self.can_toggle = np.asarray(self.can_toggle, dtype=bool)
+            if self.can_toggle.shape != (Kmax,):
+                raise ValueError(
+                    f"can_toggle must have shape {(Kmax,)}, got {self.can_toggle.shape}"
+                )
 
         if self.can_change is None:
             self.can_change = np.ones((Kmax,), dtype=bool)
         else:
             self.can_change = np.asarray(self.can_change, dtype=bool)
+            if self.can_change.shape != (Kmax,):
+                raise ValueError(
+                    f"can_change must have shape {(Kmax,)}, got {self.can_change.shape}"
+                )
 
-        # Enforce must_be_on invariant immediately
         self.m[..., self.must_be_on] = True
 
 
